@@ -15,7 +15,7 @@ Usage:
     sudo python3 sensel_config.py
 """
 
-import os, sys, time, select
+import os, sys, time, select, re
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -511,9 +511,101 @@ def main_menu(fd):
             print(colored("  Unknown option. Try 1, 2, 3, 4, or q.", DIM))
 
 
+# ─── CLI flag helpers ────────────────────────────────────────────────────────
+
+def name_to_flag(name):
+    """Convert register name to CLI flag: 'Click force' -> '--set-click-force'."""
+    return "--set-" + re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')
+
+
+def flag_to_reg(flag):
+    """Find a register matching a --set-xxx flag. Returns (Reg, value_str) or None."""
+    for reg in SETTINGS:
+        if flag == name_to_flag(reg.name):
+            return reg
+    return None
+
+
+def print_cli_help():
+    """Print non-interactive usage."""
+    print(f"\nUsage: sudo python3 {sys.argv[0]} [OPTIONS]")
+    print(f"\nWith no options, starts interactive mode.\n")
+    print("Options:")
+    print(f"  {'--show':<45} Show current settings and exit")
+    print(f"  {'--defaults':<45} Restore factory defaults and exit")
+    print()
+    print("Set individual values (in human units — grams, %, on/off):")
+    for reg in SETTINGS:
+        flag = name_to_flag(reg.name)
+        if reg.unit == "on/off":
+            example = f"{flag}=on|off"
+        elif reg.unit == "grams":
+            example = f"{flag}=<{reg.min_val}-{reg.max_val}g>"
+        else:
+            example = f"{flag}=<{reg.min_val}-{reg.max_val}%>"
+        default_h = reg.fmt_human(reg.to_human(reg.default))
+        print(f"  {example:<45} {reg.name} (default: {default_h})")
+    print()
+    print("Example:")
+    print(f"  sudo python3 {sys.argv[0]} \\")
+    print(f"    --set-click-force=76 \\")
+    print(f"    --set-click-release-threshold=50 \\")
+    print(f"    --set-haptic-feedback-intensity=35")
+    print()
+
+
+def parse_flag_value(reg, value_str):
+    """Parse a human-unit value string for a register. Returns raw byte value."""
+    if reg.unit == "on/off":
+        if value_str.lower() in ('on', 'yes', '1', 'true'):
+            return 1
+        if value_str.lower() in ('off', 'no', '0', 'false'):
+            return 0
+        raise ValueError(f"Expected on/off, got '{value_str}'")
+    try:
+        human_val = float(value_str.rstrip('g').rstrip('%'))
+    except ValueError:
+        raise ValueError(f"Not a number: '{value_str}'")
+    if human_val < reg.min_val or human_val > reg.max_val:
+        raise ValueError(f"Out of range ({reg.min_val}-{reg.max_val}), got {human_val}")
+    return reg.from_human(human_val)
+
+
+def run_cli_set(fd, set_args):
+    """Apply --set-xxx=value arguments. Returns True if all succeeded."""
+    ok = True
+    for flag, value_str in set_args:
+        reg = flag_to_reg(flag)
+        if reg is None:
+            print(f"  Unknown flag: {flag}")
+            ok = False
+            continue
+        try:
+            raw = parse_flag_value(reg, value_str)
+            current = read_register(fd, reg.addr)[0]
+            if current == raw:
+                print(f"  {reg.name}: already at {reg.fmt_human(reg.to_human(raw))}")
+                continue
+            write_register(fd, reg.addr, bytes([raw]))
+            time.sleep(0.05)
+            verify = read_register(fd, reg.addr)[0]
+            old_h = reg.fmt_human(reg.to_human(current))
+            new_h = reg.fmt_human(reg.to_human(raw))
+            if verify == raw:
+                print(f"  {reg.name}: {old_h} -> {new_h}")
+            else:
+                print(f"  {reg.name}: WRITE FAILED (read back {verify})")
+                ok = False
+        except Exception as e:
+            print(f"  {reg.name}: {e}")
+            ok = False
+    return ok
+
+
 # ─── Entry point ─────────────────────────────────────────────────────────────
 
-def main():
+def open_device():
+    """Find, open and sanity-check the Sensel hidraw device."""
     if os.geteuid() != 0:
         print(f"\n  This tool needs root access to talk to the touchpad.")
         print(f"  Run: sudo python3 {sys.argv[0]}\n")
@@ -532,7 +624,6 @@ def main():
         print(f"  Run: sudo python3 {sys.argv[0]}\n")
         sys.exit(1)
 
-    # Sanity check
     try:
         read_register(fd, 0x006E)
     except Exception as e:
@@ -540,6 +631,64 @@ def main():
         os.close(fd)
         sys.exit(1)
 
+    return fd, device
+
+
+def main():
+    args = sys.argv[1:]
+
+    # Help
+    if any(a in ('-h', '--help', 'help') for a in args):
+        print_cli_help()
+        sys.exit(0)
+
+    # Parse --set-xxx=value and --show/--defaults flags
+    set_args = []
+    show_only = False
+    restore = False
+    for arg in args:
+        if arg == '--show':
+            show_only = True
+        elif arg == '--defaults':
+            restore = True
+        elif arg.startswith('--set-') and '=' in arg:
+            flag, value = arg.split('=', 1)
+            set_args.append((flag, value))
+        else:
+            print(f"  Unknown argument: {arg}")
+            print(f"  Run with --help for usage.\n")
+            sys.exit(1)
+
+    # Non-interactive: --show
+    if show_only:
+        fd, device = open_device()
+        print_banner(device)
+        read_all_values(fd)
+        os.close(fd)
+        return
+
+    # Non-interactive: --defaults
+    if restore:
+        fd, device = open_device()
+        restore_defaults(fd)
+        os.close(fd)
+        return
+
+    # Non-interactive: --set-xxx=value
+    if set_args:
+        # Validate all flags before opening device
+        for flag, value_str in set_args:
+            if flag_to_reg(flag) is None:
+                print(f"  Unknown flag: {flag}")
+                print(f"  Run with --help for available flags.\n")
+                sys.exit(1)
+        fd, device = open_device()
+        ok = run_cli_set(fd, set_args)
+        os.close(fd)
+        sys.exit(0 if ok else 1)
+
+    # Interactive mode (no args)
+    fd, device = open_device()
     print_banner(device)
     read_all_values(fd)
     main_menu(fd)
