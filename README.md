@@ -65,7 +65,8 @@ No dependencies — just Python 3 and root access.
 
 ## Important notes
 
-- **Changes are RAM-only** — they revert on reboot or resume from sleep
+- **Changes are RAM-only** — they revert whenever the touchpad loses power: always
+  on a full power-off, and on some machines across suspend or reboot too
 - `install.sh` makes them stick by re-applying a saved config (see below)
 - The tool auto-detects the hidraw device (scans for vendor `2C2F`)
 - No dependencies beyond Python 3 stdlib
