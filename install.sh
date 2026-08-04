@@ -39,10 +39,17 @@ if [[ -f $CONFIG ]]; then
 	exit 0
 fi
 
+later="Create it later with: sudo sensel_config.py --save-config"
+
+# Not a terminal (piped, or run from a script): don't block on a prompt.
+if [[ ! -t 0 ]]; then
+	echo "No $CONFIG yet. $later"
+	exit 0
+fi
+
 read -r -p "Create $CONFIG from current touchpad settings? [y/N] " answer
-if [[ ${answer,,} == y ]]; then
-	"$SCRIPT" --save-config
-else
-	echo "Skipped — nothing is restored until $CONFIG exists."
-	echo "Create it later with: sudo sensel_config.py --save-config"
+if [[ ${answer,,} != y ]]; then
+	echo "Skipped — nothing is restored until $CONFIG exists. $later"
+elif ! "$SCRIPT" --save-config; then
+	echo "Could not read the touchpad, so $CONFIG was not created. $later"
 fi

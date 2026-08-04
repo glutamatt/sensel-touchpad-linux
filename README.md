@@ -81,7 +81,7 @@ That installs the script to `/usr/local/bin/`, enables a oneshot service for
 boot and a `systemd-sleep` hook for resume, and offers to create
 `/etc/sensel-touchpad.conf` from your current settings. `--uninstall` reverses
 it. To do it by hand, copy `sensel_config.py` and the two files in `systemd/`
-to those paths, then `systemctl enable --now sensel-touchpad.service`.
+to those paths, run `--save-config`, then `systemctl enable sensel-touchpad.service`.
 
 The config is `key=value` with `#` comments, keys being the `--set-` flags minus
 the prefix:
