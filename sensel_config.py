@@ -636,6 +636,9 @@ def config_search_paths():
     Under sudo a bare '~' is /root, so the invoking user's home is checked too.
     """
     paths = [SYSTEM_CONFIG_PATH]
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    if xdg:
+        paths.append(os.path.join(xdg, CONFIG_BASENAME))
     homes = []
     sudo_user = os.environ.get("SUDO_USER")
     if sudo_user and sudo_user != "root":
