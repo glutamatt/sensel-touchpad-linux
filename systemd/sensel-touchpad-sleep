@@ -1,0 +1,8 @@
+#!/bin/bash
+# Installed to /usr/lib/systemd/system-sleep/sensel-touchpad.
+# systemd calls this with $1 = pre|post, $2 = the sleep operation. Hooks run in
+# parallel and resume waits for them, so --apply-config caps its retries at ~5s.
+
+case "$1" in
+	post) exec /usr/local/bin/sensel_config.py --apply-config ;;
+esac
