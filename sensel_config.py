@@ -9,18 +9,32 @@ Protocol documented through interoperability analysis of the vendor HID interfac
 
 Supported devices:
     - SNSL0028:00 2C2F:0028 (ThinkPad X1 Carbon Gen 12)
+    - SNSL002D:00 2C2F:002D (ThinkPad P1)
     - Should work with other Sensel touchpads (vendor 2C2F)
+
+Writes are RAM-only; --save-config plus the systemd units in systemd/ re-apply
+them on boot and resume.
 
 Usage:
     sudo python3 sensel_config.py
 """
 
-import os, sys, time, select, re
+import os, sys, time, select, re, pwd
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 
 REPORT_ID = 0x09
 PACKET_SIZE = 21
+
+CONFIG_BASENAME = "sensel-touchpad.conf"
+SYSTEM_CONFIG_PATH = f"/etc/{CONFIG_BASENAME}"
+SERVICE_PATH = "/etc/systemd/system/sensel-touchpad.service"
+SLEEP_HOOK_PATH = "/usr/lib/systemd/system-sleep/sensel-touchpad"
+
+# Linear backoff for a touchpad that has not enumerated yet: 5s worst case,
+# capped because system-sleep hooks block the tail of resume.
+RETRY_ATTEMPTS = 5
+RETRY_BASE_DELAY = 0.5
 
 # ─── HID pipe transport ─────────────────────────────────────────────────────
 
@@ -427,10 +441,13 @@ def quick_click_adjust(fd):
             print(colored("    Applied! Try clicking your touchpad now.", GREEN, BOLD))
         else:
             print(colored(f"    WARNING: readback mismatch (click={v1}, release={v2})", RED))
+            return
     except Exception as e:
         print(colored(f"    Error: {e}", RED))
+        return
 
     print(colored("    Changes are RAM-only — revert on reboot/sleep.", DIM))
+    offer_save_config(fd)
 
 
 def restore_defaults(fd):
@@ -469,6 +486,7 @@ def main_menu(fd):
         print(f"    {colored('2', BOLD, CYAN)}  Tune settings interactively")
         print(f"    {colored('3', BOLD, CYAN)}  Quick adjust: click force only")
         print(f"    {colored('4', BOLD, CYAN)}  Restore factory defaults")
+        print(f"    {colored('5', BOLD, CYAN)}  Keep current settings across reboot/sleep")
         print(f"    {colored('q', BOLD, CYAN)}  Quit")
         print()
 
@@ -489,6 +507,7 @@ def main_menu(fd):
                     print(f"    {reg.name}: {old_h} -> {colored(new_h, GREEN)}")
                 print()
                 print(colored("  Note: changes are RAM-only. They revert on reboot/sleep.", DIM))
+                offer_save_config(fd)
 
         elif choice in ('3', 'quick', 'click'):
             print()
@@ -503,19 +522,28 @@ def main_menu(fd):
             else:
                 print("  Aborted.")
 
+        elif choice in ('5', 'save', 'keep', 'persist'):
+            print()
+            save_current_settings(fd)
+
         elif choice in ('q', 'quit', 'exit', ''):
             print(colored("  Bye!", DIM))
             break
 
         else:
-            print(colored("  Unknown option. Try 1, 2, 3, 4, or q.", DIM))
+            print(colored("  Unknown option. Try 1-5 or q.", DIM))
 
 
 # ─── CLI flag helpers ────────────────────────────────────────────────────────
 
+def name_to_key(name):
+    """Convert register name to config key: 'Click force' -> 'click-force'."""
+    return re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')
+
+
 def name_to_flag(name):
     """Convert register name to CLI flag: 'Click force' -> '--set-click-force'."""
-    return "--set-" + re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')
+    return "--set-" + name_to_key(name)
 
 
 def flag_to_reg(flag):
@@ -533,6 +561,11 @@ def print_cli_help():
     print("Options:")
     print(f"  {'--show':<45} Show current settings and exit")
     print(f"  {'--defaults':<45} Restore factory defaults and exit")
+    print(f"  {'--save-config[=PATH]':<45} Write current settings to a config file")
+    print(f"  {'--apply-config[=PATH]':<45} Apply settings from a config file")
+    print()
+    print("Config file is key=value with '#' comments, keys being the --set- flags")
+    print(f"below minus the prefix. Default: {', '.join(config_search_paths())}")
     print()
     print("Set individual values (in human units — grams, %, on/off):")
     for reg in SETTINGS:
@@ -602,36 +635,189 @@ def run_cli_set(fd, set_args):
     return ok
 
 
+# ─── Config file ─────────────────────────────────────────────────────────────
+
+def config_search_paths():
+    """Default config locations, most specific first.
+
+    Under sudo a bare '~' is /root, so the invoking user's home is checked too.
+    """
+    paths = [SYSTEM_CONFIG_PATH]
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    if xdg:
+        paths.append(os.path.join(xdg, CONFIG_BASENAME))
+    homes = []
+    sudo_user = os.environ.get("SUDO_USER")
+    if sudo_user and sudo_user != "root":
+        try:
+            homes.append(pwd.getpwnam(sudo_user).pw_dir)
+        except KeyError:
+            pass
+    homes.append(os.path.expanduser("~"))
+    for home in homes:
+        path = os.path.join(home, ".config", CONFIG_BASENAME)
+        if path not in paths:
+            paths.append(path)
+    return paths
+
+
+def parse_config_file(path):
+    """Parse key=value lines into [(flag, value), ...]. Raises ValueError."""
+    entries = []
+    with open(path) as f:
+        for lineno, raw in enumerate(f, 1):
+            line = raw.split('#', 1)[0].strip()
+            if not line:
+                continue
+            where = f"{path}:{lineno}"
+            if '=' not in line:
+                raise ValueError(f"{where}: expected key=value, got '{line}'")
+            key, value = (part.strip() for part in line.split('=', 1))
+            reg = flag_to_reg("--set-" + key.lower())
+            if reg is None:
+                raise ValueError(f"{where}: unknown setting '{key}'")
+            try:
+                parse_flag_value(reg, value)  # validate before touching the device
+            except ValueError as e:
+                raise ValueError(f"{where}: {key}: {e}")
+            entries.append((name_to_flag(reg.name), value))
+    return entries
+
+
+def apply_config(path=None):
+    """Apply a config file. Returns an exit code. Used by boot and resume."""
+    if path is None:
+        path = next((p for p in config_search_paths() if os.path.isfile(p)), None)
+        if path is None:
+            print(f"  No config found in: {', '.join(config_search_paths())}")
+            print(f"  Create one with: {sys.argv[0]} --save-config")
+            return 1
+    try:
+        entries = parse_config_file(path)
+    except (ValueError, OSError) as e:
+        print(f"  {e}")
+        return 1
+    if not entries:
+        print(f"  {path}: no settings to apply.")
+        return 0
+
+    try:
+        fd, device = open_device_with_retry()
+    except DeviceError as e:
+        print(f"  {e}")
+        return 1
+    print(f"  Applying {len(entries)} setting(s) from {path} to {device}")
+    try:
+        return 0 if run_cli_set(fd, entries) else 1
+    finally:
+        os.close(fd)
+
+
+def save_config(fd, path=None):
+    """Write current settings to a config file. Returns an exit code."""
+    path = path or SYSTEM_CONFIG_PATH
+    lines = [f"# Sensel touchpad settings — generated {time.strftime('%Y-%m-%d %H:%M')}"]
+    for reg in SETTINGS:
+        try:
+            human = reg.to_human(read_register(fd, reg.addr)[0])
+        except Exception as e:
+            print(colored(f"  Skipping {reg.name}: {e}", RED))
+            continue
+        value = ("on" if human else "off") if reg.unit == "on/off" else f"{human:g}"
+        lines.append(f"{name_to_key(reg.name)}={value}")
+
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w") as f:
+            f.write("\n".join(lines) + "\n")
+    except OSError as e:
+        print(colored(f"  Could not write {path}: {e}", RED))
+        return 1
+    print(colored(f"  Wrote {path} ({len(lines) - 1} settings)", GREEN))
+    return 0
+
+
+def save_current_settings(fd):
+    """Snapshot the live settings, and say whether anything will re-apply them."""
+    if save_config(fd) != 0:
+        return
+    if os.path.exists(SERVICE_PATH) and os.path.exists(SLEEP_HOOK_PATH):
+        print(colored("  These will be re-applied on boot and resume.", GREEN))
+    else:
+        print(colored("  Nothing applies them yet — run: sudo ./install.sh", YELLOW))
+
+
+def offer_save_config(fd):
+    """Offer to persist the settings just applied."""
+    if input(colored("\n  Keep these across reboot/sleep? [y/N] ", BOLD)).strip().lower() == 'y':
+        save_current_settings(fd)
+
+
 # ─── Entry point ─────────────────────────────────────────────────────────────
 
-def open_device():
-    """Find, open and sanity-check the Sensel hidraw device."""
+class DeviceError(RuntimeError):
+    """The touchpad could not be found, opened, or talked to."""
+
+
+def require_root():
+    """Exit unless running as root."""
     if os.geteuid() != 0:
         print(f"\n  This tool needs root access to talk to the touchpad.")
         print(f"  Run: sudo python3 {sys.argv[0]}\n")
         sys.exit(1)
 
+
+def try_open_device():
+    """Find, open and sanity-check the device. Raises DeviceError."""
     device = find_hidraw_device()
     if device is None:
-        print("\n  No Sensel touchpad found (vendor 2C2F).")
-        print("  Check: cat /sys/class/hidraw/hidraw*/device/uevent | grep 2C2F\n")
-        sys.exit(1)
+        raise DeviceError("No Sensel touchpad found (vendor 2C2F)")
 
     try:
         fd = os.open(device, os.O_RDWR | os.O_NONBLOCK)
-    except PermissionError:
-        print(f"\n  Cannot open {device} — permission denied.")
-        print(f"  Run: sudo python3 {sys.argv[0]}\n")
-        sys.exit(1)
+    except OSError as e:
+        raise DeviceError(f"Cannot open {device}: {e}")
 
     try:
         read_register(fd, 0x006E)
     except Exception as e:
-        print(f"\n  Cannot communicate with touchpad on {device}: {e}\n")
         os.close(fd)
-        sys.exit(1)
+        raise DeviceError(f"Cannot communicate with touchpad on {device}: {e}")
 
     return fd, device
+
+
+def open_device():
+    """Open the device or exit with a human-friendly hint."""
+    require_root()
+    try:
+        return try_open_device()
+    except DeviceError as e:
+        msg = str(e)
+        print(f"\n  {msg}.")
+        if "No Sensel touchpad" in msg:
+            print("  Check: cat /sys/class/hidraw/hidraw*/device/uevent | grep 2C2F")
+        elif "Permission denied" in msg:
+            print(f"  Run: sudo python3 {sys.argv[0]}")
+        print()
+        sys.exit(1)
+
+
+def open_device_with_retry(attempts=RETRY_ATTEMPTS, base_delay=RETRY_BASE_DELAY):
+    """Open the device, retrying while it enumerates at boot or after resume."""
+    require_root()
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            return try_open_device()
+        except DeviceError as e:
+            last_error = e
+            if attempt < attempts - 1:
+                delay = base_delay * (attempt + 1)
+                print(f"  Touchpad not ready ({e}); retry "
+                      f"{attempt + 2}/{attempts} in {delay:.1f}s")
+                time.sleep(delay)
+    raise last_error
 
 
 def main():
@@ -642,15 +828,19 @@ def main():
         print_cli_help()
         sys.exit(0)
 
-    # Parse --set-xxx=value and --show/--defaults flags
+    # Parse --set-xxx=value and --show/--defaults/--*-config flags
     set_args = []
     show_only = False
     restore = False
+    config_flag, config_path = None, None
     for arg in args:
         if arg == '--show':
             show_only = True
         elif arg == '--defaults':
             restore = True
+        elif arg.split('=', 1)[0] in ('--apply-config', '--save-config'):
+            config_flag, _, path = arg.partition('=')
+            config_path = path or None
         elif arg.startswith('--set-') and '=' in arg:
             flag, value = arg.split('=', 1)
             set_args.append((flag, value))
@@ -658,6 +848,17 @@ def main():
             print(f"  Unknown argument: {arg}")
             print(f"  Run with --help for usage.\n")
             sys.exit(1)
+
+    # Non-interactive: --apply-config (what the boot service and sleep hook run)
+    if config_flag == '--apply-config':
+        sys.exit(apply_config(config_path))
+
+    # Non-interactive: --save-config
+    if config_flag == '--save-config':
+        fd, device = open_device()
+        code = save_config(fd, config_path)
+        os.close(fd)
+        sys.exit(code)
 
     # Non-interactive: --show
     if show_only:

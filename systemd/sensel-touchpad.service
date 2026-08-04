@@ -1,0 +1,12 @@
+[Unit]
+Description=Restore Sensel touchpad settings
+After=multi-user.target
+ConditionPathExists=/etc/sensel-touchpad.conf
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/sensel_config.py --apply-config
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
