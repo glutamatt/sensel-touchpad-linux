@@ -41,6 +41,7 @@ No dependencies — just Python 3 and root access.
     2  Tune settings interactively
     3  Quick adjust: click force only
     4  Restore factory defaults
+    5  Keep current settings across reboot/sleep
     q  Quit
 ```
 
@@ -49,6 +50,7 @@ No dependencies — just Python 3 and root access.
 - All values in human units (grams, percentages, on/off)
 - Confirmation before every write, read-back verification after
 - Factory defaults stored — restore anytime with option 4
+- **Option 5** writes whatever you currently have to `/etc/sensel-touchpad.conf` so it survives reboot and sleep
 
 ## What you can tune
 
@@ -100,7 +102,8 @@ sudo python3 sensel_config.py --apply-config  # apply now (also what boot/resume
 Both take an optional `=PATH`; otherwise it's `/etc/sensel-touchpad.conf`, then
 `~/.config/sensel-touchpad.conf` (the sudo user's home, not root's). Bad keys or
 out-of-range values are reported with a line number and nothing is applied.
-Interactive tuning offers to save when you're done.
+Menu option 5 does the same as `--save-config`, and tuning offers it when you're
+done, so you never have to write the file by hand.
 
 Because the touchpad may not have enumerated when the boot service runs, and
 briefly vanishes across suspend, `--apply-config` retries for up to ~5s rather

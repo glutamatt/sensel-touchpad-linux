@@ -28,6 +28,8 @@ PACKET_SIZE = 21
 
 CONFIG_BASENAME = "sensel-touchpad.conf"
 SYSTEM_CONFIG_PATH = f"/etc/{CONFIG_BASENAME}"
+SERVICE_PATH = "/etc/systemd/system/sensel-touchpad.service"
+SLEEP_HOOK_PATH = "/usr/lib/systemd/system-sleep/sensel-touchpad"
 
 # Linear backoff for a touchpad that has not enumerated yet: 5s worst case,
 # capped because system-sleep hooks block the tail of resume.
@@ -484,6 +486,7 @@ def main_menu(fd):
         print(f"    {colored('2', BOLD, CYAN)}  Tune settings interactively")
         print(f"    {colored('3', BOLD, CYAN)}  Quick adjust: click force only")
         print(f"    {colored('4', BOLD, CYAN)}  Restore factory defaults")
+        print(f"    {colored('5', BOLD, CYAN)}  Keep current settings across reboot/sleep")
         print(f"    {colored('q', BOLD, CYAN)}  Quit")
         print()
 
@@ -519,12 +522,16 @@ def main_menu(fd):
             else:
                 print("  Aborted.")
 
+        elif choice in ('5', 'save', 'keep', 'persist'):
+            print()
+            save_current_settings(fd)
+
         elif choice in ('q', 'quit', 'exit', ''):
             print(colored("  Bye!", DIM))
             break
 
         else:
-            print(colored("  Unknown option. Try 1, 2, 3, 4, or q.", DIM))
+            print(colored("  Unknown option. Try 1-5 or q.", DIM))
 
 
 # ─── CLI flag helpers ────────────────────────────────────────────────────────
@@ -730,12 +737,20 @@ def save_config(fd, path=None):
     return 0
 
 
+def save_current_settings(fd):
+    """Snapshot the live settings, and say whether anything will re-apply them."""
+    if save_config(fd) != 0:
+        return
+    if os.path.exists(SERVICE_PATH) and os.path.exists(SLEEP_HOOK_PATH):
+        print(colored("  These will be re-applied on boot and resume.", GREEN))
+    else:
+        print(colored("  Nothing applies them yet — run: sudo ./install.sh", YELLOW))
+
+
 def offer_save_config(fd):
     """Offer to persist the settings just applied."""
-    if input(colored("\n  Save as persistent config? [y/N] ", BOLD)).strip().lower() != 'y':
-        return
-    if save_config(fd) == 0:
-        print(colored("  Restore on boot/resume: sudo ./install.sh", DIM))
+    if input(colored("\n  Keep these across reboot/sleep? [y/N] ", BOLD)).strip().lower() == 'y':
+        save_current_settings(fd)
 
 
 # ─── Entry point ─────────────────────────────────────────────────────────────
