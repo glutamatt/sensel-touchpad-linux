@@ -1,22 +1,25 @@
 # Re-apply Sensel touchpad firmware config on every device enumeration.
 # The firmware loses its register values when the device is power-cycled
-# (cold boot). Udev fires `add` on the next enumeration — that's our hook.
+# (cold boot). Udev fires `add` on the next enumeration — that's our hook,
+# so no retry loop or boot-ordering guesswork is needed: the device exists
+# by the time RUN executes.
 #
 # Matcher: KERNELS walks parent devices and matches the HID device kernel name,
-# format <bus>:<vendor>:<product>.<instance>
-#   0018 = I2C HID, 2C2F = Sensel Inc., 0028 = ThinkPad X1 Carbon Gen 12
+# format <bus>:<vendor>:<product>.<instance> — e.g. 0018:2C2F:0028.0002.
+# 2C2F = Sensel Inc.; bus and product are wildcarded to cover every model.
 # (HID_ID env var only lives on the HID parent, not on the hidraw child, so
 #  ENV{HID_ID}=... would never match the add event for the hidraw subsystem.)
 #
-# Install:
+# Values come from /etc/sensel-touchpad.conf — snapshot yours with:
+#   sudo sensel_config.py --save-config
+#
+# Install (done for you by install.sh):
 #   sudo cp 99-sensel-touchpad.rules /etc/udev/rules.d/
 #   sudo udevadm control --reload-rules
 #
 # Test without rebooting:
-#   sudo udevadm trigger --action=add /dev/hidraw1
+#   sudo udevadm trigger --action=add --subsystem-match=hidraw
 #   sudo python3 sensel_config.py --show
-#
-# Edit the RUN+= line below to change applied values, then reload rules.
 
-ACTION=="add", SUBSYSTEM=="hidraw", KERNELS=="0018:2C2F:0028.*", \
-  RUN+="/usr/bin/python3 /home/matt/repositories/github.com/glutamatt/sensel-touchpad-linux/sensel_config.py --set-click-force=64 --set-click-release-threshold=42 --set-haptic-feedback-intensity=30"
+ACTION=="add", SUBSYSTEM=="hidraw", KERNELS=="*:2C2F:*", \
+  RUN+="/usr/bin/python3 /usr/local/bin/sensel_config.py --apply-config"

@@ -1,6 +1,7 @@
 #!/bin/bash
-# Install sensel_config.py plus the boot service and resume hook that re-apply
-# your settings (firmware writes are RAM-only).
+# Install sensel_config.py plus everything that re-applies your settings
+# (firmware writes are RAM-only): a udev rule fired when the device enumerates,
+# a boot service, and a resume hook.
 #
 #   sudo ./install.sh              install
 #   sudo ./install.sh --uninstall  remove, keeping the config file
@@ -11,6 +12,7 @@ CONFIG=/etc/sensel-touchpad.conf
 SCRIPT=/usr/local/bin/sensel_config.py
 UNIT=/etc/systemd/system/sensel-touchpad.service
 HOOK=/usr/lib/systemd/system-sleep/sensel-touchpad
+RULE=/etc/udev/rules.d/99-sensel-touchpad.rules
 SRC=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 if [[ $EUID -ne 0 ]]; then
@@ -20,8 +22,9 @@ fi
 
 if [[ "${1:-}" == "--uninstall" ]]; then
 	systemctl disable --now sensel-touchpad.service 2>/dev/null || true
-	rm -f "$SCRIPT" "$UNIT" "$HOOK"
+	rm -f "$SCRIPT" "$UNIT" "$HOOK" "$RULE"
 	systemctl daemon-reload
+	udevadm control --reload-rules
 	echo "Removed. Config left at $CONFIG"
 	exit 0
 fi
@@ -29,10 +32,12 @@ fi
 install -Dm755 "$SRC/sensel_config.py" "$SCRIPT"
 install -Dm644 "$SRC/systemd/sensel-touchpad.service" "$UNIT"
 install -Dm755 "$SRC/systemd/sensel-touchpad-sleep" "$HOOK"
+install -Dm644 "$SRC/99-sensel-touchpad.rules" "$RULE"
 systemctl daemon-reload
 systemctl enable sensel-touchpad.service >/dev/null
+udevadm control --reload-rules
 
-echo "Installed $SCRIPT, $UNIT, $HOOK"
+echo "Installed $SCRIPT, $UNIT, $HOOK, $RULE"
 
 if [[ -f $CONFIG ]]; then
 	echo "Using existing $CONFIG"

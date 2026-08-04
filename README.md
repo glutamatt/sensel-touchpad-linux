@@ -80,11 +80,14 @@ of stored on the device:
 sudo ./install.sh
 ```
 
-That installs the script to `/usr/local/bin/`, enables a oneshot service for
-boot and a `systemd-sleep` hook for resume, and offers to create
-`/etc/sensel-touchpad.conf` from your current settings. `--uninstall` reverses
-it. To do it by hand, copy `sensel_config.py` and the two files in `systemd/`
-to those paths, run `--save-config`, then `systemctl enable sensel-touchpad.service`.
+That installs the script to `/usr/local/bin/`, a udev rule that re-applies the
+config whenever a Sensel hidraw device enumerates (which is exactly when the
+firmware has lost its registers — a cold boot power-cycles the touchpad), plus
+a oneshot boot service and a `systemd-sleep` hook as belt-and-braces, and
+offers to create `/etc/sensel-touchpad.conf` from your current settings.
+`--uninstall` reverses it. To do it by hand, copy `sensel_config.py`,
+`99-sensel-touchpad.rules` and the two files in `systemd/` to those paths, run
+`--save-config`, then `systemctl enable sensel-touchpad.service`.
 
 The config is `key=value` with `#` comments, keys being the `--set-` flags minus
 the prefix:
